@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from langchain_core.runnables import RunnableLambda, RunnableSequence
@@ -10,6 +11,10 @@ from chromadb.utils import embedding_functions
 from azure.ai.inference import ChatCompletionsClient
 from azure.ai.inference.models import SystemMessage, UserMessage, AssistantMessage
 from azure.core.credentials import AzureKeyCredential
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -24,8 +29,9 @@ if not github_token:
 # Initialize in-memory ChromaDB client (volatile)
 chroma_client = chromadb.Client()
 
-# Initialize conversation history
+# Initialize conversation history and latest answer
 conversation_history = []
+latest_answer = ""
 
 # Custom Recursive Text Splitter
 class CustomRecursiveTextSplitter:
@@ -86,8 +92,8 @@ def extract_video_id(url: str) -> dict:
 def fetch_transcript(video_id_dict: dict) -> dict:
     try:
         video_id = video_id_dict["video_id"]
-        transcript = YouTubeTranscriptApi().fetch(video_id, languages=['en'])
-        transcript_text = " ".join([snippet['text'] for snippet in transcript.to_raw_data()])
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        transcript_text = " ".join([snippet['text'] for snippet in transcript])
         return {"video_id": video_id, "transcript": transcript_text}
     except TranscriptsDisabled:
         raise Exception("Transcripts are disabled for this video.")
@@ -96,7 +102,7 @@ def fetch_transcript(video_id_dict: dict) -> dict:
     except Exception as e:
         raise Exception(f"Error fetching transcript: {str(e)}")
 
-# Function to split transcript
+# Function to split transcript using CustomRecursiveTextSplitter
 def split_transcript(data: dict) -> dict:
     text_splitter = CustomRecursiveTextSplitter(
         chunk_size=500,
@@ -256,8 +262,10 @@ def create_prompt(data: dict) -> dict:
 
 # Function to query Azure AI model
 def query_azure_ai(data: dict) -> dict:
-    endpoint = "https://models.github.ai/inference"
-    model = "openai/gpt-4.1"
+    global latest_answer
+    # Use correct GitHub Models endpoint
+    endpoint = "https://models.inference.ai.azure.com"  # Verified for GitHub Models
+    model = "gpt-4o"  # Verify available models in your GitHub Models setup
     
     client = ChatCompletionsClient(
         endpoint=endpoint,
@@ -265,6 +273,7 @@ def query_azure_ai(data: dict) -> dict:
     )
     
     try:
+        logger.info(f"Querying Azure AI model with messages: {data['messages']}")
         response = client.complete(
             messages=data["messages"],
             temperature=1.0,
@@ -272,6 +281,8 @@ def query_azure_ai(data: dict) -> dict:
             model=model
         )
         answer = response.choices[0].message.content
+        latest_answer = answer
+        logger.info(f"Received answer: {answer}")
         
         conversation_history.append({"role": "assistant", "content": AssistantMessage(answer)})
         
@@ -282,10 +293,16 @@ def query_azure_ai(data: dict) -> dict:
             "conversation_history": conversation_history
         }
     except Exception as e:
+        error_msg = f"Error querying model: {str(e)}"
+        logger.error(error_msg)
+        latest_answer = error_msg
+        
+        conversation_history.append({"role": "assistant", "content": AssistantMessage(error_msg)})
+        
         return {
             "query": data["query"],
             "similar_chunks": data["similar_chunks"],
-            "answer": f"Error querying model: {str(e)}",
+            "answer": error_msg,
             "conversation_history": conversation_history
         }
 
