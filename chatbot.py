@@ -15,6 +15,9 @@ hf_api_key = os.getenv("HUGGINGFACE_API_KEY")
 if not hf_api_key:
     raise ValueError("HUGGINGFACE_API_KEY not found in .env file")
 
+# Initialize in-memory ChromaDB client (volatile, resets every run)
+chroma_client = chromadb.Client()  # In-memory client, no persistence
+
 # Function to extract video ID from YouTube URL
 def extract_video_id(url: str) -> dict:
     video_id_pattern = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
@@ -57,19 +60,21 @@ def text_to_embeddings(transcript_dict: dict) -> dict:
 
 # Function to store embeddings in ChromaDB
 def store_in_chromadb(data: dict) -> dict:
-    client = chromadb.PersistentClient(path="./chroma_db_yt_transcripts")
     collection_name = "youtube_transcripts"
     
-    # Create or get collection
+    # Reset collection to ensure a fresh start each run
     try:
-        collection = client.get_collection(collection_name)
+        chroma_client.delete_collection(collection_name)
     except:
-        collection = client.create_collection(
-            name=collection_name,
-            embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
-            )
+        pass  # Collection may not exist yet
+    
+    # Create new collection
+    collection = chroma_client.create_collection(
+        name=collection_name,
+        embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
+    )
     
     # Generate a unique ID for the document
     doc_id = f"transcript_{data['video_id']}"
@@ -89,7 +94,7 @@ def store_in_chromadb(data: dict) -> dict:
         "video_id": data["video_id"],
         "transcript": data["transcript"],
         "embeddings": data["embeddings"],
-        "chroma_status": f"Stored transcript for video {data['video_id']} in ChromaDB"
+        "chroma_status": f"Stored transcript for video {data['video_id']} in volatile ChromaDB"
     }
 
 # Function to format output
