@@ -5,6 +5,8 @@ from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, No
 from langchain_core.runnables import RunnableLambda, RunnableSequence
 from transformers import AutoModel, AutoTokenizer
 import torch
+import chromadb
+from chromadb.utils import embedding_functions
 
 # Load environment variables from .env file
 load_dotenv()
@@ -53,13 +55,51 @@ def text_to_embeddings(transcript_dict: dict) -> dict:
         "embeddings": embeddings
     }
 
+# Function to store embeddings in ChromaDB
+def store_in_chromadb(data: dict) -> dict:
+    client = chromadb.PersistentClient(path="./chroma_db_yt_transcripts")
+    collection_name = "youtube_transcripts"
+    
+    # Create or get collection
+    try:
+        collection = client.get_collection(collection_name)
+    except:
+        collection = client.create_collection(
+            name=collection_name,
+            embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+        )
+    
+    # Generate a unique ID for the document
+    doc_id = f"transcript_{data['video_id']}"
+    
+    # Store the embedding
+    collection.add(
+        ids=[doc_id],
+        embeddings=[data['embeddings']],
+        metadatas=[{
+            "video_id": data["video_id"],
+            "transcript": data["transcript"][:1000]  # Limit metadata size
+        }],
+        documents=[data["transcript"]]
+    )
+    
+    return {
+        "video_id": data["video_id"],
+        "transcript": data["transcript"],
+        "embeddings": data["embeddings"],
+        "chroma_status": f"Stored transcript for video {data['video_id']} in ChromaDB"
+    }
+
 # Function to format output
 def format_output(data: dict) -> dict:
     return {
         "video_id": data["video_id"],
         "transcript_excerpt": data["transcript"][:100] + "..." if len(data["transcript"]) > 100 else data["transcript"],
         "embeddings_first_10": data["embeddings"][:10],
-        "embedding_length": len(data["embeddings"])
+        "embedding_length": len(data["embeddings"]),
+        "chroma_status": data["chroma_status"]
     }
 
 # Define LangChain chain
@@ -73,7 +113,10 @@ def create_transcript_embedding_chain():
     # Step 3: Convert to embeddings
     embeddings_step = RunnableLambda(text_to_embeddings)
     
-    # Step 4: Format output
+    # Step 4: Store in ChromaDB
+    store_step = RunnableLambda(store_in_chromadb)
+    
+    # Step 5: Format output
     format_step = RunnableLambda(format_output)
     
     # Create the chain
@@ -81,6 +124,7 @@ def create_transcript_embedding_chain():
         extract_video_id_step,
         fetch_transcript_step,
         embeddings_step,
+        store_step,
         format_step
     )
     return chain
@@ -101,6 +145,7 @@ def main():
         print(f"Transcript excerpt: {result['transcript_excerpt']}")
         print(f"Vector Embeddings (first 10 values): {result['embeddings_first_10']}")
         print(f"Total embedding length: {result['embedding_length']}")
+        print(f"ChromaDB Status: {result['chroma_status']}")
         
     except Exception as e:
         print(f"Error: {str(e)}")
