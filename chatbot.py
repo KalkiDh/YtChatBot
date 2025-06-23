@@ -18,6 +18,56 @@ if not hf_api_key:
 # Initialize in-memory ChromaDB client (volatile, resets every run)
 chroma_client = chromadb.Client()  # In-memory client, no persistence
 
+# Custom Recursive Text Splitter
+class CustomRecursiveTextSplitter:
+    def __init__(self, chunk_size=500, chunk_overlap=50, separators=None):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+        self.separators = separators or [
+            "\n\n", "\n", " ", ".", ",", "\u200b", "\uff0c", "\u3001", "\uff0e", "\u3002", ""
+        ]
+
+    def split_text(self, text):
+        """Recursively split text into chunks based on separators."""
+        if len(text) <= self.chunk_size:
+            return [text.strip()] if text.strip() else []
+
+        chunks = []
+        for separator in self.separators:
+            if separator in text:
+                splits = text.split(separator)
+                current_chunk = ""
+                for split in splits:
+                    split = split.strip()
+                    if not split:
+                        continue
+                    temp_chunk = current_chunk + (separator if current_chunk else "") + split
+                    if len(temp_chunk) <= self.chunk_size:
+                        current_chunk = temp_chunk
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                            # Add overlap from the end of the current chunk
+                            overlap_start = max(0, len(current_chunk) - self.chunk_overlap)
+                            current_chunk = current_chunk[overlap_start:] + (separator if current_chunk else "") + split
+                        else:
+                            # If split is too large, recurse on it
+                            sub_chunks = self.split_text(split)
+                            chunks.extend(sub_chunks)
+                            current_chunk = ""
+                if current_chunk:
+                    chunks.append(current_chunk)
+                return chunks if chunks else []
+
+        # If no separators work, split by character
+        chunks = []
+        for i in range(0, len(text), self.chunk_size - self.chunk_overlap):
+            chunk = text[i:i + self.chunk_size]
+            chunks.append(chunk)
+            if len(chunk) < self.chunk_size:
+                break
+        return [chunk.strip() for chunk in chunks if chunk.strip()]
+
 # Function to extract video ID from YouTube URL
 def extract_video_id(url: str) -> dict:
     video_id_pattern = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
@@ -41,20 +91,36 @@ def fetch_transcript(video_id_dict: dict) -> dict:
     except Exception as e:
         raise Exception(f"Error fetching transcript: {str(e)}")
 
-# Function to convert text to embeddings
-def text_to_embeddings(transcript_dict: dict) -> dict:
+# Function to split transcript using CustomRecursiveTextSplitter
+def split_transcript(data: dict) -> dict:
+    text_splitter = CustomRecursiveTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50,
+        separators=["\n\n", "\n", " ", ".", ",", "\u200b", "\uff0c", "\u3001", "\uff0e", "\u3002", ""]
+    )
+    chunks = text_splitter.split_text(data["transcript"])
+    return {
+        "video_id": data["video_id"],
+        "transcript_chunks": chunks
+    }
+
+# Function to convert text chunks to embeddings
+def text_to_embeddings(data: dict) -> dict:
     model_name = "sentence-transformers/all-MiniLM-L6-v2"
     tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_api_key)
     model = AutoModel.from_pretrained(model_name, token=hf_api_key)
     
-    text = transcript_dict["transcript"]
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    embeddings = outputs.last_hidden_state.mean(dim=1).squeeze().numpy().tolist()
+    embeddings = []
+    for chunk in data["transcript_chunks"]:
+        inputs = tokenizer(chunk, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        chunk_embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy().tolist()
+        embeddings.append(chunk_embedding)
+    
     return {
-        "video_id": transcript_dict["video_id"],
-        "transcript": transcript_dict["transcript"],
+        "video_id": data["video_id"],
+        "transcript_chunks": data["transcript_chunks"],
         "embeddings": embeddings
     }
 
@@ -76,58 +142,72 @@ def store_in_chromadb(data: dict) -> dict:
         )
     )
     
-    # Generate a unique ID for the document
-    doc_id = f"transcript_{data['video_id']}"
-    
-    # Store the embedding
-    collection.add(
-        ids=[doc_id],
-        embeddings=[data['embeddings']],
-        metadatas=[{
+    # Store each chunk's embedding
+    ids = []
+    embeddings = []
+    metadatas = []
+    documents = []
+    for idx, (chunk, embedding) in enumerate(zip(data["transcript_chunks"], data["embeddings"])):
+        doc_id = f"transcript_{data['video_id']}_chunk_{idx}"
+        ids.append(doc_id)
+        embeddings.append(embedding)
+        metadatas.append({
             "video_id": data["video_id"],
-            "transcript": data["transcript"][:1000]  # Limit metadata size
-        }],
-        documents=[data["transcript"]]
+            "chunk_index": idx,
+            "chunk_text": chunk[:1000]  # Limit metadata size
+        })
+        documents.append(chunk)
+    
+    collection.add(
+        ids=ids,
+        embeddings=embeddings,
+        metadatas=metadatas,
+        documents=documents
     )
     
     return {
         "video_id": data["video_id"],
-        "transcript": data["transcript"],
+        "transcript_chunks": data["transcript_chunks"],
         "embeddings": data["embeddings"],
-        "chroma_status": f"Stored transcript for video {data['video_id']} in volatile ChromaDB"
+        "chroma_status": f"Stored {len(data['transcript_chunks'])} data chunks for video {data['video_id']} in volatile ChromaDB"
     }
 
 # Function to format output
 def format_output(data: dict) -> dict:
     return {
         "video_id": data["video_id"],
-        "transcript_excerpt": data["transcript"][:100] + "..." if len(data["transcript"]) > 100 else data["transcript"],
-        "embeddings_first_10": data["embeddings"][:10],
-        "embedding_length": len(data["embeddings"]),
+        "transcript_chunk_count": len(data["transcript_chunks"]),
+        "first_chunk_excerpt": data["transcript_chunks"][0][:100] + "..." if data["transcript_chunks"] and len(data["transcript_chunks"][0]) > 100 else data["transcript_chunks"][0] if data["transcript_chunks"] else "",
+        "first_chunk_embeddings": data["embeddings"][0][:10] if data["embeddings"] else [],
+        "embedding_length": len(data["embeddings"][0]) if data["embeddings"] else 0,
         "chroma_status": data["chroma_status"]
     }
 
 # Define LangChain chain
-def create_transcript_embedding_chain():
+def create_transcript_chain():
     # Step 1: Extract video ID
     extract_video_id_step = RunnableLambda(extract_video_id)
     
     # Step 2: Fetch transcript
     fetch_transcript_step = RunnableLambda(fetch_transcript)
     
-    # Step 3: Convert to embeddings
+    # Step 3: Split transcript into chunks
+    split_transcript_step = RunnableLambda(split_transcript)
+    
+    # Step 4: Convert chunks to embeddings
     embeddings_step = RunnableLambda(text_to_embeddings)
     
-    # Step 4: Store in ChromaDB
+    # Step 5: Store in ChromaDB
     store_step = RunnableLambda(store_in_chromadb)
     
-    # Step 5: Format output
+    # Step 6: Format output
     format_step = RunnableLambda(format_output)
     
     # Create the chain
     chain = RunnableSequence(
         extract_video_id_step,
         fetch_transcript_step,
+        split_transcript_step,
         embeddings_step,
         store_step,
         format_step
@@ -136,7 +216,7 @@ def create_transcript_embedding_chain():
 
 def main():
     # Create the chain
-    chain = create_transcript_embedding_chain()
+    chain = create_transcript_chain()
     
     # Get YouTube URL from user
     youtube_url = input("Enter YouTube video URL: ")
@@ -147,9 +227,10 @@ def main():
         
         # Print results
         print(f"Video ID: {result['video_id']}")
-        print(f"Transcript excerpt: {result['transcript_excerpt']}")
-        print(f"Vector Embeddings (first 10 values): {result['embeddings_first_10']}")
-        print(f"Total embedding length: {result['embedding_length']}")
+        print(f"Number of Transcript Chunks: {result['transcript_chunk_count']}")
+        print(f"First Chunk Excerpt: {result['first_chunk_excerpt']}")
+        print(f"First Chunk Embeddings (first 10 values): {result['first_chunk_embeddings']}")
+        print(f"Embedding Length: {result['embedding_length']}")
         print(f"ChromaDB Status: {result['chroma_status']}")
         
     except Exception as e:
