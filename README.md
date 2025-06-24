@@ -17,13 +17,13 @@ A Python-based chatbot that fetches transcripts from YouTube videos, embeds them
 ## 🖼️ Sample Interface
 
 <p align="center">
-  <img src="images/Podcast consumption" width="800"/>
+  <img src="images/Podcast consumption.png" width="800"/>
 </p>
 <p align="center">
-  <img src="images/Insight on a sub topic" width="800"/>
+  <img src="images/Insight on a sub topic.png" width="800"/>
 </p>
 <p align="center">
-  <img src="images/Generate notes" width="800"/>
+  <img src="images/Generate notes.png" width="800"/>
 </p>
 
 
