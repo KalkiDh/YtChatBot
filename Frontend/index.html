@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Chatbot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        #chatWindow {
+            height: 400px;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+        .chat-message {
+            margin: 0.5rem;
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            max-width: 80%;
+        }
+        .user-message {
+            background-color: #2563eb;
+            color: white;
+            margin-left: auto;
+        }
+        .assistant-message {
+            background-color: #4b5563;
+            color: #e5e7eb;
+            margin-right: auto;
+        }
+        .assistant-message h1 {
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+            color: #ffffff;
+        }
+        .assistant-message h2 {
+            font-size: 1.25rem;
+            font-weight: semibold;
+            margin-top: 0.75rem;
+            margin-bottom: 0.5rem;
+            color: #d1d5db;
+        }
+        .assistant-message ul {
+            list-style-type: disc;
+            padding-left: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .assistant-message strong {
+            font-weight: bold;
+            color: #ffffff;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 min-h-screen flex flex-col items-center p-4">
+    <div class="w-full max-w-2xl bg-gray-800 rounded-lg shadow-xl p-6">
+        <h1 class="text-3xl font-bold text-center mb-6 text-white">RAG Chatbot</h1>
+        <div class="mb-6">
+            <h2 class="text-xl font-semibold mb-2 text-gray-200">Upload PDF</h2>
+            <input type="file" id="pdfFile" accept=".pdf" class="block w-full text-sm text-gray-300
+                file:mr-4 file:py-2 file:px-4
+                file:rounded-md file:border-0
+                file:text-sm file:font-semibold
+                file:bg-gray-700 file:text-gray-200
+                hover:file:bg-gray-600">
+            <button onclick="uploadPDF()" class="mt-2 w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                Upload PDF
+            </button>
+        </div>
+        <div class="mb-6">
+            <h2 class="text-xl font-semibold mb-2 text-gray-200">Select a PDF and Ask a Question</h2>
+            <select id="pdfName" class="w-full mb-2 p-2 bg-gray-700 border border-gray-600 text-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="" class="bg-gray-700 text-gray-200">Select a PDF</option>
+            </select>
+            <div class="flex">
+                <input type="text" id="query" placeholder="Enter your query (e.g., Summarise this document)" class="flex-grow p-2 bg-gray-700 border border-gray-600 text-gray-200 rounded-l-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <button onclick="sendQuery()" class="bg-blue-600 text-white py-2 px-4 rounded-r-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    Send
+                </button>
+            </div>
+        </div>
+        <div class="mb-6">
+            <h2 class="text-xl font-semibold mb-2 text-gray-200">Conversation History</h2>
+            <div id="chatWindow" class="bg-gray-700 border border-gray-600 rounded-md p-4">
+            </div>
+        </div>
+    </div>
+    <script>
+        const API_BASE_URL = 'http://127.0.0.1:8000';
+        async function uploadPDF() {
+            const fileInput = document.getElementById('pdfFile');
+            if (!fileInput.files.length) {
+                alert('Please select a PDF file.');
+                return;
+            }
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            try {
+                const response = await fetch(`${API_BASE_URL}/upload-pdf`, {
+                    method: 'POST',
+                    body: formData
+                });
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail[0].msg || 'Upload failed');
+                }
+                const data = await response.json();
+                alert(data.message);
+                fileInput.value = '';
+                loadPDFList();
+            } catch (error) {
+                alert(`Error uploading PDF: ${error.message}`);
+                console.error('Upload error:', error);
+            }
+        }
+        async function sendQuery() {
+            const query = document.getElementById('query').value.trim();
+            const pdfName = document.getElementById('pdfName').value.trim();
+            if (!pdfName) {
+                alert('Please select a PDF.');
+                return;
+            }
+            if (!query) {
+                alert('Please enter a query.');
+                return;
+            }
+            try {
+                const response = await fetch(`${API_BASE_URL}/query`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ query, pdf_name: pdfName })
+                });
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail[0].msg || error.detail || 'Query failed');
+                }
+                const data = await response.json();
+                document.getElementById('query').value = '';
+                await updateHistory(pdfName);
+            } catch (error) {
+                alert(`Error sending query: ${error.message}`);
+                console.error('Query error:', error);
+            }
+        }
+        async function updateHistory(pdfName) {
+            if (!pdfName) return;
+            try {
+                const response = await fetch(`${API_BASE_URL}/history?pdf_name=${encodeURIComponent(pdfName)}`);
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail[0].msg || 'Failed to fetch history');
+                }
+                const history = await response.json();
+                const chatWindow = document.getElementById('chatWindow');
+                chatWindow.innerHTML = '';
+                history.forEach(entry => {
+                    const div = document.createElement('div');
+                    div.className = `chat-message ${entry.role === 'user' ? 'user-message' : 'assistant-message'}`;
+                    if (entry.role === 'assistant') {
+                        div.innerHTML = marked.parse(entry.content);
+                    } else {
+                        div.textContent = entry.content;
+                    }
+                    chatWindow.appendChild(div);
+                });
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+            } catch (error) {
+                console.error(`Error fetching history: ${error.message}`);
+            }
+        }
+        async function loadPDFList() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/list-pdfs`);
+                if (!response.ok) throw new Error('Failed to fetch PDF list');
+                const pdfs = await response.json();
+                const select = document.getElementById('pdfName');
+                select.innerHTML = '<option value="" class="bg-gray-700 text-gray-200">Select a PDF</option>';
+                pdfs.forEach(pdf => {
+                    const option = document.createElement('option');
+                    option.value = pdf;
+                    option.textContent = pdf;
+                    option.className = 'bg-gray-700 text-gray-200';
+                    select.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading PDF list:', error);
+            }
+        }
+        document.getElementById('pdfName').addEventListener('change', () => {
+            const pdfName = document.getElementById('pdfName').value.trim();
+            updateHistory(pdfName);
+        });
+        document.addEventListener('DOMContentLoaded', loadPDFList);
+    </script>
+</body>
+</html>
